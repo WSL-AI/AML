@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+.jupyter/kernels/aml-venv/kernel.json
+artifacts/
+.vscode/
+catboost_info/
+/data/
+.DS_Store
