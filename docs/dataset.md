@@ -7,7 +7,7 @@
 | Поле           | Тип      | Описание               |
 | -------------- | -------- | ---------------------- |
 | Timestamp | datetime   | Время совершения операции |
-| From Bank      | int64 | Банк отправителя         |
+| From Bank      | string | Банк отправителя         |
 | Account      | string   | Отправитель            |
 | To Bank    | int64   | Банк получателя             |
 | Account.1         | string    | Получатель                  |
@@ -16,4 +16,4 @@
 | Amount Paid  | float64      | Сумма перевода     |
 | Payment Currency  | object      | Валюта перевода     |
 | Payment Format  | object      | Способ проведения транзакции     |
-| Is Laundering  | bool      | Целевая переменная     |
+| Is Laundering  | int8 (0/1) | Целевая переменная     |
