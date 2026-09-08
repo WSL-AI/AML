@@ -1,0 +1,7 @@
+{
+  "01_eda.ipynb": "a1bf01315be50ee68a7e00b080be1173fc223aa0a8df3dc00bf51b2c1459c225",
+  "02_feature_selection.ipynb": "f19ef93e0db4ee4990682877f94f5cdbdeef81fa26b2e4876ec5620a74606204",
+  "03_training.ipynb": "f3e9472a3416c581fd0e033dc7fbfd88fdf1ca15f887bde627ff9e60a21c93b7",
+  "04_evaluation.ipynb": "f50664fc47086a0031240882b9e6e99f260694a1c38147fab06418ae5cf67e37",
+  "05_data_drift_evidently.ipynb": "6ca4ee429f67a8e98581ca1dd0acdf3f4ea7e6cc4732dc47adb908f33791f2f5"
+}
