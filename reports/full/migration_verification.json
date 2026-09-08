@@ -1,0 +1,16 @@
+{
+  "run_id": "8cb38b1c-cad8-49a9-9eeb-90eb5fd05af0",
+  "test_rows": 1039102,
+  "metrics_match_saved": true,
+  "confusion_matrix": [
+    [
+      1038236,
+      115
+    ],
+    [
+      511,
+      240
+    ]
+  ],
+  "scope": "Reloaded existing champion; no retraining, model selection, or threshold tuning"
+}

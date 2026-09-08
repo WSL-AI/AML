@@ -1,0 +1,13 @@
+{
+  "seed": 42,
+  "alert_fraction": 0.001,
+  "negative_sample_ratio": 0.39,
+  "folds": 3,
+  "initial_days": 3,
+  "validation_days": 1,
+  "evaluation_days": 1,
+  "iterations": 800,
+  "learning_rate": 0.05,
+  "xgboost_max_depth": 6,
+  "lightgbm_num_leaves": 31
+}

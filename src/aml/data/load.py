@@ -1,95 +1,48 @@
-from __future__ import annotations
-
+"""Public loading helpers shared with the notebook workflow."""
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
+from aml.workflow import RAW_COLUMNS, TARGET, validate_raw, resolve_run
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PATH = PROJECT_ROOT / "data" / "processed"
+PATH = PROJECT_ROOT / 'data/processed'
+SPLIT_PATH = PROJECT_ROOT / 'artifacts/runs/full/data'
+CSV_COLUMNS = RAW_COLUMNS
 
-TARGET = "Is Laundering"
-CSV_COLUMNS = [
-    "Timestamp",
-    "From Bank",
-    "Account",
-    "To Bank",
-    "Account.1",
-    "Amount Received",
-    "Receiving Currency",
-    "Amount Paid",
-    "Payment Currency",
-    "Payment Format",
-    TARGET,
-]
-DTYPES = {
-    "From Bank": "string",
-    "Account": "string",
-    "To Bank": "string",
-    "Account.1": "string",
-    "Amount Received": "float64",
-    "Receiving Currency": "string",
-    "Amount Paid": "float64",
-    "Payment Currency": "string",
-    "Payment Format": "string",
-    TARGET: "int8",
-}
 
-def load_raw_data(file_name: str = "raw", path: str | Path = PATH, dtypes=DTYPES) -> pd.DataFrame:
+def load_raw_data(file_name='raw', path=PATH, dtypes=None):
+    """Read validated raw Parquet; retain identical rows without a transaction ID."""
+    df = pd.read_parquet(Path(path) / f'{file_name}.parquet', columns=RAW_COLUMNS)
+    if dtypes is not None:
+        df = df.astype(dtypes)
+    return validate_raw(df)
+
+
+def load_dataset_splits(sets=None, input_dir=None, target_col=TARGET):
+    """Load explicit splits deterministically; missing files are errors, not omissions.
+
+    None loads train/val/threshold/test. 'all' discovers labeled parquet files,
+    excluding the timestamp sidecars. Raw data is included only if present and
+    explicitly requested with 'all' or 'raw'.
     """
-    Just loads dataset .parquet without feature engineering and splits
-    """
-    input_path = Path(path)
-    if not input_path.exists():
-            raise FileNotFoundError(f"Specified directory does not exist: {input_path}")
-    df = pd.read_parquet(path / f"{file_name}.parquet")
-
-    df = (
-    df.drop_duplicates()
-      .sort_values("Timestamp", kind="mergesort")
-      .reset_index(drop=True)
-    )
-
-    return df
-
-def load_dataset_splits(sets: list = None,
-                        input_dir: str | Path = PATH, 
-                        target_col: str = "Is Laundering",
-                        ) -> dict[str, tuple[pd.DataFrame, pd.Series]]:
-    """
-    Loads splits of the dataset from Parquet files, separated by X and Y.
-    
-    sets: None - if you need to load all splits without raw (train, val, test)
-            ["...", "..."] - if you only need a few of them (["train", "val"])
-            "all" - if you need absolutely all splits (raw, train, val, test)
-    input_dir: path to the folder containing the files.
-    target_col: target ("Is Laundering")
-    """
-    input_path = Path(input_dir)
-
-    if not input_path.exists():
-        raise FileNotFoundError(f"Specified directory does not exist: {input_path}")
-
+    path = Path(input_dir) if input_dir is not None else resolve_run(PROJECT_ROOT) / "data"
+    if not path.is_dir():
+        raise FileNotFoundError(path)
     if sets is None:
-        target_splits = {p.stem for p in input_path.glob("*.parquet")} - {"raw"}
-    elif sets in ("all", ["all"]):
-        target_splits = {p.stem for p in input_path.glob("*.parquet")}
+        names = ['train', 'val', 'threshold', 'test']
+    elif sets == 'all' or sets == ['all']:
+        names = sorted(p.stem for p in path.glob('*.parquet') if not p.stem.endswith('_time'))
     else:
-        target_splits = set(sets) if isinstance(sets, list) else {sets}
-
-    splits = {}
-    for split_name in target_splits:
-        file_path = input_path / f"{split_name}.parquet"
-        
-        if not file_path.exists():
-            continue 
-            
-        df = pd.read_parquet(file_path)
-        splits[split_name] = (df.drop(columns=[target_col]), df[target_col])
-
-    if not splits:
-        raise FileNotFoundError(
-            f"В директории {input_path} не найдено .parquet файлов."
-        )
-    
-    return splits
+        names = [sets] if isinstance(sets, str) else list(sets)
+    if not names:
+        raise FileNotFoundError(f'No dataset splits in {path}')
+    result = {}
+    for name in names:
+        if Path(name).name != name:
+            raise ValueError('Expected a split name, not a path')
+        frame = pd.read_parquet(path / f'{name}.parquet')
+        if target_col not in frame:
+            raise ValueError(f'{name}: missing target {target_col}')
+        result[name] = (frame.drop(columns=[target_col]), frame[target_col])
+    return result
