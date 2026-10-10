@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import pandas as pd
+import pyarrow.parquet as pq
 from pathlib import Path
 import hashlib
 
 from dataclasses import dataclass
 
-from .schema import RAW_COLUMNS
+from .schema import RAW_COLUMNS, CATEGORICAL
 
 @dataclass
 class ExtractData:
@@ -20,14 +21,24 @@ class ExtractData:
 def extract_dataset(data_path, smoke = False):
     path = Path(data_path)
     if path.suffix == ".parquet":
-        df = pd.read_parquet(path, columns=RAW_COLUMNS)
         if smoke:
-            df = df.iloc[::50].reset_index(drop=True)
+            chunks = []
+            offset = 0
+            for batch in pq.ParquetFile(path).iter_batches(batch_size=100000, columns=RAW_COLUMNS):
+                frame = batch.to_pandas()
+                chunks.append(frame.iloc[(-offset) % 50::50])
+                offset += len(frame)
+            df = pd.concat(chunks, ignore_index=True) if chunks else pd.read_parquet(path, columns=RAW_COLUMNS)
+        else:
+            df = pd.read_parquet(path, columns=RAW_COLUMNS)
 
     elif path.suffix == ".csv":
         chunks = []
 
-        for chunk in pd.read_csv(path, usecols=RAW_COLUMNS, chunksize=100_000,):
+        for chunk in pd.read_csv(
+            path, usecols=RAW_COLUMNS, chunksize=100000,
+            dtype={column: "string" for column in CATEGORICAL},
+        ):
             if smoke:
                 chunk = chunk.iloc[::50]
 
@@ -37,9 +48,6 @@ def extract_dataset(data_path, smoke = False):
 
     else:
         raise ValueError(f"Unsupported format: {path.suffix}")
-
-    if smoke:
-        return ExtractData(df=df)
     
     return ExtractData(
         df=df,
@@ -52,6 +60,8 @@ def extract_dataset(data_path, smoke = False):
 
 
 def calculate_sha256(path, chunk_size: int = 1024 * 1024) -> str:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
     path = Path(path)
     hasher = hashlib.sha256()
 

@@ -1,7 +1,7 @@
 TARGET = "Is Laundering"
 TIMESTAMP = "Timestamp"
 
-CATEGORICAL_COLUMNS = [
+CATEGORICAL = [
     "From Bank",
     "Account",
     "To Bank",
@@ -11,15 +11,15 @@ CATEGORICAL_COLUMNS = [
     "Payment Format",
 ]
 
-AMOUNT_COLUMNS = [
+AMOUNT = [
     "Amount Paid",
     "Amount Received",
 ]
 
 RAW_COLUMNS = [
     TIMESTAMP,
-    *CATEGORICAL_COLUMNS,
-    *AMOUNT_COLUMNS,
+    *CATEGORICAL,
+    *AMOUNT,
     TARGET,
 ]
 
