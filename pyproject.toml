@@ -20,6 +20,9 @@ dependencies = [
     "xgboost>=3,<4",
 ]
 
+[project.scripts]
+aml-etl = "aml.cli.etl:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

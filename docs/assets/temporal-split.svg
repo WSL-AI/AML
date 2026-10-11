@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330" role="img" aria-labelledby="title desc">
+  <title id="title">Временное разбиение AML-данных</title>
+  <desc id="desc">Train занимает примерно 70 процентов строк, validation 10, threshold 5 и test 15. История накапливается слева направо, одинаковые timestamps не разделяются.</desc>
+  <defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="none" stroke="#64748b" stroke-width="1.5"/></marker></defs>
+  <rect width="1200" height="330" rx="22" fill="#f8fafc"/>
+  <g font-family="Arial, DejaVu Sans, sans-serif">
+    <text x="40" y="48" font-size="27" font-weight="700" fill="#0f172a">Сначала прошлое, потом будущее</text>
+    <text x="40" y="80" font-size="18" fill="#475569">Доли заданы по числу строк, а не по длительности периодов</text>
+    <rect x="40" y="112" width="784" height="65" fill="#dbeafe"/>
+    <rect x="824" y="112" width="112" height="65" fill="#ccfbf1"/>
+    <rect x="936" y="112" width="56" height="65" fill="#fef3c7"/>
+    <rect x="992" y="112" width="168" height="65" fill="#e0e7ff"/>
+    <text x="432" y="152" text-anchor="middle" font-size="23" font-weight="700" fill="#1e40af">Train · ≈70%</text>
+    <text x="880" y="152" text-anchor="middle" font-size="18" font-weight="700" fill="#115e59">Val · ≈10%</text>
+    <text x="1076" y="152" text-anchor="middle" font-size="20" font-weight="700" fill="#4338ca">Test · ≈15%</text>
+    <path d="M964 180 V196" stroke="#a16207" stroke-width="2"/>
+    <text x="964" y="219" text-anchor="middle" font-size="17" fill="#854d0e">Threshold · ≈5%</text>
+    <path d="M40 247 H1156" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="40" y="284" font-size="18" fill="#334155">История растёт по времени. Метки в неё не входят.</text>
+    <text x="40" y="311" font-size="17" fill="#64748b">Граница сдвигается к началу timestamp-группы: строки с одинаковым временем остаются вместе.</text>
+  </g>
+</svg>

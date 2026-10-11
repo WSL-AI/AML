@@ -1,48 +1,99 @@
-"""Public loading helpers shared with the notebook workflow."""
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
-import pandas as pd
+import pyarrow.parquet as pq
 
-from aml.workflow import RAW_COLUMNS, TARGET, validate_raw, resolve_run
+from .transform import TransformResult
+from .extract import ExtractData
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PATH = PROJECT_ROOT / 'data/processed'
-SPLIT_PATH = PROJECT_ROOT / 'artifacts/runs/full/data'
-CSV_COLUMNS = RAW_COLUMNS
-
-
-def load_raw_data(file_name='raw', path=PATH, dtypes=None):
-    """Read validated raw Parquet; retain identical rows without a transaction ID."""
-    df = pd.read_parquet(Path(path) / f'{file_name}.parquet', columns=RAW_COLUMNS)
-    if dtypes is not None:
-        df = df.astype(dtypes)
-    return validate_raw(df)
+from .schema import TARGET
+from .read import (
+    CATEGORICAL, RAW_COLUMNS, CSV_COLUMNS, PROJECT_ROOT, PATH, SPLIT_PATH,
+    load_raw_data, load_raw, load_dataset_splits, load_split,
+    resolve_run, scale_train_set, temporal_slices, validate_raw,
+)
 
 
-def load_dataset_splits(sets=None, input_dir=None, target_col=TARGET):
-    """Load explicit splits deterministically; missing files are errors, not omissions.
-
-    None loads train/val/threshold/test. 'all' discovers labeled parquet files,
-    excluding the timestamp sidecars. Raw data is included only if present and
-    explicitly requested with 'all' or 'raw'.
-    """
-    path = Path(input_dir) if input_dir is not None else resolve_run(PROJECT_ROOT) / "data"
-    if not path.is_dir():
-        raise FileNotFoundError(path)
-    if sets is None:
-        names = ['train', 'val', 'threshold', 'test']
-    elif sets == 'all' or sets == ['all']:
-        names = sorted(p.stem for p in path.glob('*.parquet') if not p.stem.endswith('_time'))
-    else:
-        names = [sets] if isinstance(sets, str) else list(sets)
-    if not names:
-        raise FileNotFoundError(f'No dataset splits in {path}')
-    result = {}
+def load_etl_result(
+    result: TransformResult,
+    output_dir: Path,
+    source_metadata: ExtractData,
+    configuration: dict | None = None,
+) -> Path:
+    """Save an immutable run, publishing its pointer only after completion."""
+    names = ("train", "val", "threshold", "test")
+    if set(result.splits) != set(names):
+        raise ValueError("Expected train, val, threshold and test splits")
+    previous_end = None
     for name in names:
-        if Path(name).name != name:
-            raise ValueError('Expected a split name, not a path')
-        frame = pd.read_parquet(path / f'{name}.parquet')
-        if target_col not in frame:
-            raise ValueError(f'{name}: missing target {target_col}')
-        result[name] = (frame.drop(columns=[target_col]), frame[target_col])
-    return result
+        split = result.splits[name]
+        if not len(split.X) or not len(split.X) == len(split.y) == len(split.timestamps):
+            raise ValueError(f"{name}: empty split or inconsistent row counts")
+        if not split.X.index.equals(split.y.index) or not split.X.index.equals(split.timestamps.index):
+            raise ValueError(f"{name}: inconsistent row indices")
+        if TARGET in split.X or "Timestamp" in split.X:
+            raise ValueError(f"{name}: target or timestamp included in features")
+        if split.X.columns.tolist() != result.feature_names:
+            raise ValueError(f"{name}: inconsistent feature columns")
+        if {column: str(dtype) for column, dtype in split.X.dtypes.items()} != result.feature_schema:
+            raise ValueError(f"{name}: inconsistent feature dtypes")
+        if not split.y.isin([0, 1]).all():
+            raise ValueError(f"{name}: target must be binary")
+        if split.timestamps.isna().any() or not split.timestamps.is_monotonic_increasing:
+            raise ValueError(f"{name}: invalid timestamps")
+        if previous_end is not None and previous_end >= split.timestamps.iloc[0]:
+            raise ValueError(f"{name}: temporal overlap")
+        previous_end = split.timestamps.iloc[-1]
+
+    configuration = {} if configuration is None else configuration
+    manifest = {
+        "source": {
+            "path": str(source_metadata.path.resolve()),
+            "format": source_metadata.format,
+            "sha256": source_metadata.sha256,
+            "size_bytes": source_metadata.size_bytes,
+            "extracted_rows": source_metadata.extracted_rows,
+        },
+        "transformation": result.metadata,
+    }
+    # Reject invalid metadata before allocating an output directory.
+    for metadata in (manifest, configuration, result.feature_schema, result.metadata["quality_report"]):
+        json.dumps(metadata, allow_nan=False)
+    if sum(len(split.X) for split in result.splits.values()) != source_metadata.extracted_rows:
+        raise ValueError("Splits do not cover extracted rows")
+    parent = Path(output_dir)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ_") + uuid.uuid4().hex[:12]
+    run_dir = parent / run_id
+    data_dir = run_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=False)
+
+    for name, split in result.splits.items():
+        frame = split.X.copy()
+        frame[TARGET] = split.y.to_numpy()
+        frame.to_parquet(data_dir / f"{name}.parquet", engine="pyarrow", index=False)
+
+        split.timestamps.to_frame(name="Timestamp").to_parquet(
+            data_dir / f"{name}_time.parquet",
+            index=False,
+        )
+        for filename in (f"{name}.parquet", f"{name}_time.parquet"):
+            if pq.ParquetFile(data_dir / filename).metadata.num_rows != len(split.X):
+                raise ValueError(f"{filename}: saved row count differs")
+
+    save_json(run_dir / "feature_schema.json", result.feature_schema)
+    save_json(run_dir / "quality_report.json", result.metadata["quality_report"])
+    save_json(run_dir / "data_manifest.json", manifest)
+    save_json(run_dir / "configuration.json", configuration)
+    (run_dir / "SUCCESS").write_text("Completed\n", encoding="utf-8")
+    temporary = parent / f"active.{uuid.uuid4().hex}.tmp"
+    save_json(temporary, {"path": run_id})
+    temporary.replace(parent / "active.json")
+    return run_dir
+
+def save_json(path: Path, data: dict) -> None:
+    content = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False)
+    Path(path).write_text(content + "\n", encoding="utf-8")
