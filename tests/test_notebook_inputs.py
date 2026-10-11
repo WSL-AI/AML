@@ -30,6 +30,18 @@ def test_notebook_source_lineage_and_changed_source(tmp_path, monkeypatch):
     loaded = load_run_raw(encoded)
     assert len(loaded) == 100
     assert loaded.Account.iloc[0] == "0001"
+    # EDA must run top-to-bottom in a fresh namespace, without hidden df/imports.
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    monkeypatch.setattr(plt, "show", lambda: plt.close("all"))
+    notebook = Path(__file__).resolve().parents[1] / "notebooks/01_eda.ipynb"
+    ns = {"display": lambda *args: None}
+    for cell in json.loads(notebook.read_text())["cells"]:
+        if cell["cell_type"] == "code":
+            exec("".join(cell["source"]), ns)
+    assert len(ns["df"]) == 70
+    assert ns["df"].Timestamp.max() < loaded.Timestamp.iloc[70]
     source.write_text(source.read_text() + "\n")
     with pytest.raises(ValueError, match="changed since ETL"):
         load_run_raw(encoded)
