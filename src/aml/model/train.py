@@ -2,7 +2,7 @@ from pathlib import Path
 
 from xgboost import XGBClassifier
 
-from aml.data.load import load_dataset_splits, scale_train_set
+from aml.data.read import load_dataset_splits, scale_train_set
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
