@@ -101,8 +101,9 @@ Notebooks идут в таком порядке:
 scripts/download_dataset.py # Скачать нужный CSV с Kaggle
 src/aml/cli/etl.py           # Запустить ETL одной командой
 src/aml/data/                # Чтение, проверка, split, transform и сохранение
-src/aml/features/            # Базовые и исторические признаки
-src/aml/pipeline.py          # OTE и функции исследовательских экспериментов
+src/aml/features/            # Базовые, исторические признаки и OTE encoder
+src/aml/model/               # Обучение, метрики и функции backtest
+src/aml/runs.py              # Создание запусков и указатели на артефакты
 notebooks/                  # Анализ, обучение и оценка
 tests/                      # Проверки данных, истории и записи результатов
 docs/                       # Инструкции и описание данных
