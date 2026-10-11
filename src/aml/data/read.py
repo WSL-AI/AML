@@ -17,6 +17,38 @@ SPLIT_PATH = PROJECT_ROOT / "artifacts" / "runs" / "full" / "data"
 
 CSV_COLUMNS = RAW_COLUMNS
 
+def validate_raw(df):
+    """Compatibility API returning the normalized transaction frame."""
+    return _validate_raw(df).df
+
+
+def resolve_etl_run(project_root=PROJECT_ROOT):
+    """Find the source ETL run even when the active run contains encoded features."""
+    run = resolve_run(project_root)
+    manifest = json.loads((run / "data_manifest.json").read_text())
+    if "etl_run_dir" in manifest:
+        run = Path(manifest["etl_run_dir"])
+    if not (run / "SUCCESS").is_file():
+        raise ValueError("Run notebooks/00_etl.ipynb first: no completed ETL run selected")
+    return run.resolve()
+
+
+def load_run_raw(run_dir):
+    """Read the exact source and sampling mode recorded by the selected run."""
+    from .extract import extract_dataset
+    run = Path(run_dir)
+    manifest = json.loads((run / "data_manifest.json").read_text())
+    if "etl_run_dir" in manifest:
+        return load_run_raw(manifest["etl_run_dir"])
+    source = manifest.get("source")
+    if not isinstance(source, dict) or "path" not in source:
+        raise ValueError("Source provenance missing: run notebooks/00_etl.ipynb first")
+    config = json.loads((run / "configuration.json").read_text())
+    extracted = extract_dataset(source["path"], smoke=config["smoke"])
+    if extracted.sha256 != source["sha256"] or extracted.extracted_rows != source["extracted_rows"]:
+        raise ValueError("Raw source changed since ETL; rerun 00_etl.ipynb")
+    return validate_raw(extracted.df)
+
 def load_dataset_splits(sets=None, input_dir=None, target_col=TARGET):
     """Load explicit splits deterministically; missing files are errors, not omissions.
 
