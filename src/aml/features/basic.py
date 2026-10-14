@@ -1,54 +1,43 @@
+"""Features of the current transaction alone.
+
+Day-of-month, month and day-of-week are deliberately absent: the dataset spans
+about ten days, so they identify the simulation day rather than a behaviour and
+cannot generalise to unseen dates.
+"""
 import numpy as np
 import pandas as pd
 
-from aml.data.schema import CATEGORICAL
+from aml.data.schema import CATEGORICAL, PAID_USD, RECEIVED_USD, RECEIVER, SENDER, TIMESTAMP
 
 
-def build_basic_features(df: pd.DataFrame) -> pd.DataFrame:
-    X = df[[*CATEGORICAL, "Amount Paid", "Amount Received"]].reset_index(drop=True).copy()
-    timestamp = df["Timestamp"].reset_index(drop=True)
+def build_basic_features(transactions: pd.DataFrame) -> pd.DataFrame:
+    """Row-wise features; expects USD amounts added by ``CurrencyConverter``."""
+    df = transactions.reset_index(drop=True)
+    X = df[CATEGORICAL].copy()
 
-    # Time
-    hour = timestamp.dt.hour
-    day_of_week = timestamp.dt.dayofweek
-    paid = df["Amount Paid"].clip(lower=0).reset_index(drop=True)
-    received = df["Amount Received"].clip(lower=0).reset_index(drop=True)
-
+    hour = df[TIMESTAMP].dt.hour
     X["hour"] = hour.astype("int8")
-    X["dayofweek"] = day_of_week.astype("int8")
-    X["day"] = timestamp.dt.day.astype("int8")
-    X["month"] = timestamp.dt.month.astype("int8")
-
     X["hour_sin"] = np.sin(2 * np.pi * hour / 24).astype("float32")
     X["hour_cos"] = np.cos(2 * np.pi * hour / 24).astype("float32")
-    X["dow_sin"] = np.sin(2 * np.pi * day_of_week / 7).astype("float32")
-    X["dow_cos"] = np.cos(2 * np.pi * day_of_week / 7).astype("float32")
     X["is_night"] = hour.between(0, 5).astype("int8")
-    X["is_weekend"] = day_of_week.isin([5, 6]).astype("int8")
 
-    # Current-transaction consistency
-    X["is_currency_same"] = (
-        df["Receiving Currency"] == df["Payment Currency"]
-    ).astype("int8").to_numpy()
-    X["is_same_bank"] = (
-        df["From Bank"] == df["To Bank"]
-    ).astype("int8").to_numpy()
-    X["is_self_transfer"] = (
-        (df["From Bank"] == df["To Bank"])
-        & (df["Account"] == df["Account.1"])
-    ).astype("int8").to_numpy()
+    same_bank = df[SENDER[0]].eq(df[RECEIVER[0]])
+    X["is_currency_same"] = df["Receiving Currency"].eq(df["Payment Currency"]).astype("int8")
+    X["is_same_bank"] = same_bank.astype("int8")
+    X["is_self_transfer"] = (same_bank & df[SENDER[1]].eq(df[RECEIVER[1]])).astype("int8")
 
-    # Amount transformations
-    X["log_amount_paid"] = np.log1p(paid).astype("float32")
-    X["log_amount_received"] = np.log1p(received).astype("float32")
-    X["amount_log_gap"] = np.abs(
-        X["log_amount_paid"] - X["log_amount_received"]
-    ).where(X["is_currency_same"].eq(1), 0).astype("float32")
-    X["is_round_10"] = np.isclose(np.mod(paid, 10), 0, atol=1e-8).astype("int8")
-    X["is_round_100"] = np.isclose(np.mod(paid, 100), 0, atol=1e-8).astype("int8")
-    X["is_round_1000"] = np.isclose(np.mod(paid, 1_000), 0, atol=1e-8).astype("int8")
+    paid_usd = df[PAID_USD].clip(lower=0)
+    received_usd = df[RECEIVED_USD].clip(lower=0)
+    X["amount_paid_usd_log"] = np.log1p(paid_usd).astype("float32")
+    X["amount_received_usd_log"] = np.log1p(received_usd).astype("float32")
+    # Log ratio to the inferred exchange rate; zero for a payment at the market rate.
+    priced = (paid_usd > 0) & (received_usd > 0)
+    X["fx_log_deviation"] = np.log(
+        received_usd.where(priced, 1.0) / paid_usd.where(priced, 1.0)
+    ).astype("float32")
 
+    # Roundness is a property of the amount as typed, i.e. in its own currency.
+    paid = df["Amount Paid"].clip(lower=0)
+    for base in (10, 100, 1_000):
+        X[f"is_round_{base}"] = np.isclose(np.mod(paid, base), 0, atol=1e-8).astype("int8")
     return X
-
-
-basic_features = build_basic_features
