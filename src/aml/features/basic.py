@@ -1,9 +1,3 @@
-"""Features of the current transaction alone.
-
-Day-of-month, month and day-of-week are deliberately absent: the dataset spans
-about ten days, so they identify the simulation day rather than a behaviour and
-cannot generalise to unseen dates.
-"""
 import numpy as np
 import pandas as pd
 
