@@ -223,3 +223,4 @@ artifacts/
 catboost_info/
 /data/
 .DS_Store
+aml_dashboard.html

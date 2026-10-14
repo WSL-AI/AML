@@ -1,23 +1,37 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "aml"
-version="0.0.1"
-readme="README.md"
+version = "0.0.3"
+readme = "README.md"
 requires-python = ">=3.13"
 
 dependencies = [
-    "catboost>=1.2,<2",
     "joblib>=1.5,<2",
-    "jupyter>=1.1,<2",
-    "lightgbm>=4,<5",
-    "matplotlib>=3.10,<4",
     "numpy>=2.1,<3",
-    "optuna>=4,<5",
     "pandas>=2.3,<3",
     "pyarrow>=21,<24",
+]
+
+[project.optional-dependencies]
+ml = [
+    "catboost>=1.2,<2",
+    "lightgbm>=4,<5",
+    "optuna>=4,<5",
     "scikit-learn>=1.7,<2",
-    "seaborn>=0.13,<1",
-    "torch>=2.8,<3",
     "xgboost>=3,<4",
+]
+notebooks = [
+    "aml[ml]",
+    "jupyter>=1.1,<2",
+    "matplotlib>=3.10,<4",
+    "seaborn>=0.13,<1",
+]
+dev = [
+    "aml[notebooks]",
+    "pytest>=9,<10",
 ]
 
 [project.scripts]
@@ -29,9 +43,10 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[project.optional-dependencies]
-dev = ["pytest>=9,<10"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
+filterwarnings = [
+    # Raised inside pandas 2.3 for every Timedelta under NumPy 2.5; not actionable here.
+    "ignore:The 'generic' unit for NumPy timedelta is deprecated:DeprecationWarning",
+]
