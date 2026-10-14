@@ -1,14 +1,14 @@
-from aml.data.extract import extract_dataset
-from aml.data.validate import validate_raw
-from aml.data.split import temporal_slices, validate_split_boundaries
-from aml.data.transform import transform_dataset
-from aml.data.load import load_etl_result
+from importlib import import_module
 
-__all__ = [
-    "extract_dataset",
-    "validate_raw",
-    "temporal_slices",
-    "validate_split_boundaries",
-    "transform_dataset",
-    "load_etl_result",
-]
+_EXPORTS = {
+    "EtlConfig": "transform",
+    "SplitConfig": "split",
+    "extract_dataset": "extract",
+    "load_etl_result": "load",
+    "temporal_slices": "split",
+    "transform_dataset": "transform",
+    "validate_raw": "validate",
+    "validate_split_boundaries": "split",
+}
+
+__all__ = sorted(_EXPORTS)
