@@ -1,395 +1,319 @@
-# AML: System Design
+# Как это могло бы работать в проде
 
-Design for taking the current research pipeline (CSV → ETL → notebooks → model) to an operated
-system that scores transactions, produces an analyst alert queue, learns from investigator
-outcomes and is monitored. It builds on what exists in this repo; section 2 lists what does not.
+Сейчас проект это CSV → ETL → ноутбуки → модель. Здесь я записал, как, по-моему, из этого можно сделать систему, которая сама скорит транзакции, собирает очередь алертов для аналитиков, учится на их решениях и за которой можно следить. Это план, ничего из нового ниже ещё не сделано.
 
-Status: proposal. Written against commit `4b584c5` plus the uncommitted ETL rewrite on branch `ETL`.
+## Что должна уметь система
 
----
+1. Принимать транзакции пачками по времени и проверять их (схема, диапазоны, форматы).
+2. Считать признаки только по прошлому, без утечки из будущего.
+3. Скорить каждую транзакцию текущей лучшей моделью (дальше «чемпион»).
+4. Превращать скоры в очередь алертов ограниченного размера.
+5. Давать аналитику отметить алерт и сохранять это как метку.
+6. Переобучаться по расписанию или при дрейфе и менять чемпиона только если новая модель правда лучше.
+7. Dashboard: очередь, сколько алертов, precision/recall, дрейф, версия модели.
+8. Для любого старого скора можно восстановить, какие данные, признаки, модель и порог его дали.
 
-## 1. Requirements
+Мои прикидки (их надо уточнять):
 
-### Functional
-| # | Requirement |
-|---|---|
-| F1 | Ingest transactions in time-ordered batches and validate them (schema, ranges, formats). |
-| F2 | Compute features for each transaction using only strictly earlier history (no leakage). |
-| F3 | Score each transaction with the champion model. |
-| F4 | Turn scores into a bounded alert queue for analysts. |
-| F5 | Let analysts disposition alerts; store the outcome as a label. |
-| F6 | Retrain on a schedule or on drift, evaluate against the champion, promote or reject. |
-| F7 | Dashboard: queue, alert volume, precision/recall, drift, model version. |
-| F8 | Reproduce any past score: which data, feature state, model and threshold produced it. |
-
-### Non-functional (assumptions, to be confirmed)
-| Dimension | Target | Basis |
+| Что | Сколько | Откуда взял |
 |---|---|---|
-| Volume | ~0.5 M tx/day, ~6 tx/s mean, 60 tx/s peak (10x) | HI-Small: 5.08 M rows over ~10 days |
-| Positive rate | ~0.1% | Dataset; real-world rate is likely lower |
-| Latency | Micro-batch, alert within 15 min of the transaction | Assumption. No source requirement for real-time blocking exists |
-| Alert capacity | Fixed daily budget (e.g. 0.1% ≈ 500/day) | Matches the backtest policy |
-| Availability | 99% for scoring; analyst UI may be down independently | Post-hoc monitoring, not payment authorisation |
-| Auditability | Every alert traceable to model, features, data hash | AML is regulated; model-risk review expects this |
-| Cost | Single machine or small VM; no cluster | Team size and data volume |
+| Объём | ~0.5 млн транзакций в день, в среднем ~6 в секунду, пик 60 | HI-Small: 5.08 млн строк за ~10 дней |
+| Доля отмывания | ~0.1% | из датасета, в жизни скорее меньше |
+| Задержка | алерт в течение 15 минут после транзакции | моё допущение, блокировать платежи в реальном времени не нужно |
+| Алертов в день | фиксированный бюджет, например 0.1% (~500) | как в backtest |
+| Доступность | 99% для скоринга | это проверка после факта, платежи не держим |
+| Аудит | любой алерт можно отследить до модели, признаков и хэша данных | AML регулируется |
+| Железо | одна машина или небольшая VM | данных немного |
 
-### Constraints
-- Python 3.13, pandas/pyarrow/joblib for data; XGBoost/LightGBM/CatBoost for models; `uv` lockfile.
-- Small team; the pipeline is currently notebook-driven.
-- Synthetic data with no transaction ID, no arrival time and no label-arrival time.
+Ограничения: Python 3.13, pandas/pyarrow/joblib, XGBoost/LightGBM/CatBoost, `uv`. Сейчас почти всё в ноутбуках. В данных нет ID транзакции и нет времени, когда пришла транзакция и когда пришла метка.
 
-**Out of scope:** payment blocking (hard real-time), graph/network-level detection, SAR filing workflow,
-multi-tenant bank isolation.
+Не делаю: блокировку платежей в реальном времени, графовые модели, оформление SAR, поддержку нескольких банков-клиентов.
 
----
+## Что уже есть
 
-## 2. Where the repo is today
-
-| Stage | State | Evidence |
+| Часть | Состояние | Где |
 |---|---|---|
-| Extract / validate / split | **Solid.** pyarrow reader, hash+row count in manifest, quality report, calendar-day splits, sparse-tail exclusion | `src/aml/data/` |
-| Feature pipeline | **Solid.** Stateful `FeaturePipeline` with `fit_transform` / `transform` / `transform_update`; tested against naive recompute and random batching | `features/pipeline.py`, `historical.py` |
-| Run publishing | **Good pattern.** Unique run dir, `SUCCESS` marker, atomic `active.json` | `runs.py`, `data/load.py` |
-| Categorical encoding | **Gap.** OTE exists (`features/encoding.py`) but ETL does not run it; notebook 02 does | README |
-| Training / threshold / evaluation | **Gap.** Notebooks only; `model/train.py` deleted. Only metrics and backtest windows are library code | `model/` |
-| Scoring service | **Gap.** `transform_update` exists, but nothing wraps it with encoder + model + threshold | – |
-| Alerts, labels, case feedback | **Gap.** Absent | – |
-| Monitoring | **Partial.** Drift is a notebook (05) | – |
-| Dashboard | **Prototype.** Static `aml_dashboard.html` | untracked |
+| Чтение, проверка, split | работает: pyarrow, хэш и число строк в manifest, отчёт качества, split по дням, хвост выкидывается | `src/aml/data/` |
+| Признаки | работает: `FeaturePipeline` с `fit_transform` / `transform` / `transform_update`, есть тесты против пересчёта в лоб и случайных батчей | `features/pipeline.py`, `historical.py` |
+| Сохранение run | отдельная папка, `SUCCESS`, атомарный `active.json` | `runs.py`, `data/load.py` |
+| Кодирование категорий | OTE считается прямо в ETL, encoder сохраняется | `data/transform.py`, `features/encoding.py` |
+| Обучение, порог, оценка | только в ноутбуках, в библиотеке пока только метрики и backtest | `model/` |
+| Скоринг | `transform_update` есть, но обёртки encoder + модель + порог нет | нет |
+| Алерты, метки от аналитиков | нет | нет |
+| Мониторинг | дрейф только в notebook 05 | `monitoring/` |
+| Dashboard | статический html, в git не лежит | нет |
 
-Current model quality (test, XGBoost): AP 0.374, precision 67.6%, recall 32.0% at 355 alerts. Backtest at a
-0.1% daily budget: AP 0.24, recall ~31%. The system around the model must treat it as a **prioritisation
-aid with ~⅓ coverage**, not a detector.
+Модель сейчас (XGBoost на test): AP 0.374, precision 67.6%, recall 32.0%, 355 алертов. В backtest с бюджетом 0.1% в день AP ~0.24, recall ~31%. То есть это скорее помощь в сортировке, она ловит примерно треть, а не полноценный детектор. Система вокруг должна это учитывать.
 
----
+## Общая схема
 
-## 3. High-level design
-
-```
-                        ┌────────────────────────── batch plane ──────────────────────────┐
- transactions           │                                                                  │
- (CSV/Parquet/   ─►  [1 Ingest] ─► [2 Validate] ─► [3 Feature pipeline] ─► [4 Scorer] ─► [5 Alert policy]
-  core banking)         │  raw Parquet     quality gate     stateful, single      champion        threshold +
-                        │  + manifest      + dead letter    writer, checkpointed  bundle          daily cap
-                        └──────────────────────┬──────────────────┬─────────────────────┬──────────────┘
-                                               │                  │                     │
-                                      ┌────────▼────────┐  ┌──────▼───────┐     ┌───────▼────────┐
-                                      │ Object store     │  │ State store  │     │ Postgres        │
-                                      │ raw/, scores/    │  │ pipeline     │     │ alerts, labels, │
-                                      │ (Parquet)        │  │ snapshots    │     │ score_log, runs │
-                                      └────────┬────────┘  └──────────────┘     └───────┬────────┘
-                                               │                                         │
-        ┌─────────────── learning plane ───────▼───────────────┐              ┌─────────▼─────────┐
-        │ [6 Label join] ─► [7 Train + encode] ─► [8 Evaluate]  │              │ [9 Analyst UI /   │
-        │  (matured labels)   OTE fit on train     backtest +   │◄─ labels ────│  dashboard API]   │
-        │                     Optuna, XGBoost      champion gate│              └───────────────────┘
-        │                              │                         │
-        │                       [10 Model registry: bundles]     │      [11 Monitoring: drift, alert rate,
-        └────────────────────────────────────────────────────────┘           score dist., delayed AP] → alerts to team
+```mermaid
+flowchart LR
+    subgraph batch["каждые 15 минут"]
+        T[транзакции] --> I[1 приём] --> V[2 проверка] --> F[3 признаки] --> S[4 скоринг] --> A[5 алерты]
+    end
+    I --> OS[(Parquet: raw, scores)]
+    F --> ST[(снимки состояния)]
+    A --> PG[(Postgres: алерты, метки)]
+    PG --> UI[9 интерфейс аналитика / dashboard]
+    UI -->|метки| PG
+    subgraph learn["раз в неделю"]
+        L[6 метки] --> TR[7 обучение] --> E[8 оценка] --> R[10 реестр моделей]
+    end
+    OS --> L
+    PG --> L
+    R --> S
+    M[11 мониторинг]
 ```
 
-Two planes with different cadences:
+Две части, которые работают с разной частотой:
 
-- **Batch plane** (every 15 min, or daily to begin with): ingest → score → alert. Deterministic, idempotent.
-- **Learning plane** (weekly or on trigger): rebuild datasets from raw + matured labels, train, gate, promote.
+- **Скоринг** (каждые 15 минут, для начала можно раз в день): принять → посчитать → выдать алерты. Повторный запуск на тех же данных даёт тот же результат.
+- **Обучение** (раз в неделю или по сигналу): собрать данные из raw и созревших меток, обучить, проверить, решить, менять ли чемпиона.
 
-Both planes use the **same** `FeaturePipeline` code. That is the main defence against training/serving skew
-and it already exists.
+Важно, что обе части используют один и тот же `FeaturePipeline`. Тогда признаки при обучении и при скоринге гарантированно считаются одинаково, и это уже есть.
 
-### Component responsibilities
-
-| # | Component | Responsibility | Exists |
+| # | Компонент | Что делает | Есть? |
 |---|---|---|---|
-| 1 | Ingest | Land source file/batch as immutable raw Parquet; record path, SHA256, row count, `batch_id` | `data/extract.py` (extend) |
-| 2 | Validate | Reject or quarantine bad rows; emit quality report; enforce time-order and watermark | `data/validate.py` (extend) |
-| 3 | Feature pipeline | `transform_update` on the batch; snapshot state after success | `features/pipeline.py` |
-| 4 | Scorer | Apply encoder → model from the champion bundle; write scores | new |
-| 5 | Alert policy | Threshold plus per-day cap; dedupe; assign priority | new |
-| 6 | Label join | Join analyst dispositions to transactions; apply maturity delay | new |
-| 7–8 | Train / evaluate | Port notebooks 02–04 and 06 into `aml-train`, `aml-evaluate` | notebooks → library |
-| 9 | Analyst UI | Queue, disposition buttons, explanations | new (prototype exists) |
-| 10 | Registry | Versioned bundles + `champion` pointer | pattern in `runs.py` |
-| 11 | Monitoring | Drift, volumes, alert rate, delayed metrics | notebook 05 → job |
+| 1 | Приём | сохраняет пачку как неизменяемый Parquet, пишет путь, SHA256, число строк, `batch_id` | `data/extract.py`, доделать |
+| 2 | Проверка | плохие строки в карантин, отчёт качества, порядок по времени | `data/validate.py`, доделать |
+| 3 | Признаки | `transform_update` на пачке, снимок состояния после успеха | `features/pipeline.py` |
+| 4 | Скоринг | encoder → модель из пакета чемпиона, запись скоров | новое |
+| 5 | Алерты | порог + лимит в день, без дублей, приоритет | новое |
+| 6 | Метки | присоединить решения аналитиков к транзакциям с учётом задержки | новое |
+| 7–8 | Обучение и оценка | перенести ноутбуки 02–04 и 06 в `aml-train`, `aml-evaluate` | ноутбуки → код |
+| 9 | Интерфейс аналитика | очередь, кнопки решений, объяснения | новое, есть прототип |
+| 10 | Реестр | версии пакетов и указатель на чемпиона | как в `runs.py` |
+| 11 | Мониторинг | дрейф, объёмы, доля алертов, метрики с задержкой | notebook 05 → job |
 
----
+## Подробнее
 
-## 4. Deep dive
+### Пакет модели
 
-### 4.1 The model bundle (unit of deployment)
+Нельзя, чтобы модель случайно запустилась с чужим encoder или состоянием признаков. Поэтому всё лежит вместе:
 
-A scorer must never combine a model with the wrong encoder or feature state. Package them together:
-
-```
+```text
 artifacts/bundles/<bundle_id>/
-├── feature_pipeline.joblib     # currency rates + account history up to cutoff T
-├── encoder.joblib              # OTE fitted on train only
+├── feature_pipeline.joblib     # курсы валют и история счетов на момент T
+├── encoder.joblib              # OTE, обучен только на train
 ├── model.json                  # XGBoost
-├── feature_schema.json         # ordered names + dtypes; its hash is checked at load time
-├── policy.json                 # threshold, daily cap, selection rule, period used
-├── lineage.json                # source SHA256s, ETL run_id, training run_id, code git SHA, lockfile hash
-├── metrics.json                # validation, threshold-period, test, backtest
+├── feature_schema.json         # признаки по порядку и типы, хэш сверяется при загрузке
+├── policy.json                 # порог, лимит в день, на каком периоде подбирали
+├── lineage.json                # SHA256 исходников, id запусков ETL и обучения, git SHA, хэш lockfile
+├── metrics.json                # val, threshold, test, backtest
 └── SUCCESS
-artifacts/bundles/champion.json # atomic pointer, same mechanism as active.json
+artifacts/bundles/champion.json # указатель на чемпиона, как active.json
 ```
 
-Rules:
-- Scorer refuses to start if `feature_schema.json` hash ≠ the encoder's output schema or the model's expected inputs.
-- `joblib` is pickle: loading is arbitrary code execution. Bundles are only loaded from the registry location,
-  and `lineage.json` stores a SHA256 of every file that is verified before load.
-- The champion's feature state is advanced by the scorer after each batch; the **bundle itself is immutable**.
-  State lives in a separate checkpoint (4.3), keyed by `bundle_id`.
+- Скоринг не стартует, если хэш схемы не совпадает с тем, что выдаёт encoder или ждёт модель.
+- `joblib` это pickle, при загрузке может выполниться любой код. Поэтому грузим только из реестра и сверяем SHA256 каждого файла с `lineage.json`.
+- Сам пакет не меняется. Состояние признаков, которое растёт после каждой пачки, хранится отдельно (см. ниже).
 
-### 4.2 Data model
+### Где что хранить
 
-Parquet (object store, append-only, partitioned by `date`):
+Parquet (только дописываем, по датам):
 
-| Dataset | Key columns |
+| Набор | Колонки |
 |---|---|
-| `raw/` | `batch_id`, `row_in_batch`, original 11 columns |
+| `raw/` | `batch_id`, `row_in_batch`, исходные 11 колонок |
 | `scores/` | `tx_id`, `batch_id`, `bundle_id`, `score`, `scored_at` |
-| `features/` (optional, for audit/retrain) | `tx_id`, feature columns (or recomputed from raw) |
+| `features/` (не обязательно) | `tx_id` и признаки, или пересчитывать из raw |
 
-Postgres (small, transactional):
+Postgres (маленький):
 
 ```sql
 transaction_ref(tx_id PK, batch_id, row_in_batch, ts, from_bank, from_acct, to_bank, to_acct, amount_usd)
 alert(alert_id PK, tx_id FK UNIQUE, bundle_id, score, rank_in_day, status, created_at)
   -- status: new | assigned | confirmed | false_positive | escalated
-disposition(disposition_id PK, alert_id FK, analyst, outcome, reason, decided_at)  -- append-only
+disposition(disposition_id PK, alert_id FK, analyst, outcome, reason, decided_at)  -- только дописываем
 batch_run(batch_id PK, source_sha256, row_count, state_in, state_out, bundle_id, status, started, finished)
-model_bundle(bundle_id PK, trained_at, cutoff_ts, status, metrics_json)  -- status: candidate|champion|retired
+model_bundle(bundle_id PK, trained_at, cutoff_ts, status, metrics_json)  -- candidate | champion | retired
 ```
 
-**Transaction identity.** The source has no transaction ID, and duplicates are legitimate. Define
-`tx_id = sha256(batch_id, row_in_batch)` (deterministic for a fixed source), never a content hash, so genuine
-duplicate payments stay distinct. Real core-banking feeds should supply their own ID; keep it in the same column.
+**ID транзакции.** В данных его нет, а дубликаты бывают настоящие. Поэтому `tx_id = sha256(batch_id, row_in_batch)`, а не хэш содержимого, иначе два одинаковых платежа склеятся. Если в реальном источнике есть свой ID, кладём его в ту же колонку.
 
-**Entity key.** An account is `(bank, account)`, not `account` (`data/keys.py`). All joins and shards use this pair.
+**Счёт** это всегда пара `(банк, счёт)`, а не просто номер (`data/keys.py`).
 
-### 4.3 Stateful scoring: ordering, checkpointing, recovery
+### Скоринг с состоянием
 
-The history builder is a **single-writer, time-ordered state machine** (≈91 MB on HI-Small). Its correctness
-guarantee ("only strictly earlier events") is what the test-suite verifies. The scorer must preserve it:
+История счетов (~91 МБ на HI-Small) обновляется одним процессом строго по времени. Тесты проверяют, что признаки видят только прошлое, и скоринг не должен это сломать:
 
-1. **Watermark.** Accept a batch only if `min(ts) ≥ state.max_ts`. Late data goes to a quarantine dataset and is
-   applied at the next retrain (it changes history, so it cannot be silently folded in).
-2. **Sort** the batch by timestamp (stable) – already done by `validate_raw`.
-3. **Process:** `transform_update` → encode → score → apply policy → write outputs.
-4. **Commit order:** write scores/alerts → write `state_out` snapshot to a new path → insert `batch_run` row as
-   `success` → atomically move `state/current.json`. A crash before the last step leaves the old pointer; the
-   next run re-processes the same `batch_id` and produces identical output (idempotent upsert on `tx_id`).
-5. **Recovery:** if a snapshot is lost or corrupt, rebuild by replaying `raw/` from the bundle's cutoff. Replay is
-   cheap (≈30 s per 5 M rows) – this is why raw Parquet is the source of truth and state is a cache.
+1. Пачку берём, только если `min(ts) >= state.max_ts`. Опоздавшие данные в карантин и учитываются при следующем переобучении, просто так их добавить нельзя, они меняют историю.
+2. Сортируем по времени (уже делает `validate_raw`).
+3. `transform_update` → encoder → скор → алерты → запись.
+4. Порядок записи: скоры и алерты → новый снимок состояния в новый файл → строка в `batch_run` со статусом success → переключить `state/current.json`. Если упали до последнего шага, указатель старый, перезапуск той же пачки даст то же самое (upsert по `tx_id`).
+5. Если снимок потерялся или битый, восстанавливаем, прогнав `raw/` с момента обучения модели. Это быстро (~30 с на 5 млн строк), поэтому главное это raw, а состояние просто кэш.
 
-Snapshots: keep the last N (e.g. 7) plus one per day; ~100 MB each.
+Храню последние 7 снимков и по одному на день, каждый ~100 МБ.
 
-### 4.4 Alert policy
+### Как выбирать алерты
 
-Two policies exist in the repo and they are not equivalent:
+Сейчас в проекте два разных способа, и они не одно и то же:
 
-| Policy | Where | Behaviour |
+| Способ | Где | Как работает |
 |---|---|---|
-| Max-F1 threshold (0.2988) | notebook 04 | Variable alert count; 355 alerts on 2 test days |
-| Daily top-k at 0.1% | backtest | Fixed count; needs the whole day, so **not computable online** |
+| порог по max F1 (0.2988) | notebook 04 | число алертов плавает, 355 за 2 дня test |
+| топ 0.1% за день | backtest | число фиксировано, но нужен весь день, онлайн так не посчитать |
 
-Production design: **threshold with a cap**.
-- Threshold `τ` is set from the threshold period so that the expected alerts/day ≈ analyst capacity, not to maximise F1.
-- A daily cap `K` bounds overflow: after K alerts, only transactions with `score ≥ τ_high` are added.
-- Alerts are ranked by score within the day; the UI shows the queue in that order.
-- `τ` is re-estimated at every retrain and recorded in `policy.json`. Drift in the score distribution
-  (monitoring, 4.7) can shift alert volume without any model change, so alert rate is an operational metric
-  with its own alarm.
+Для прода я бы сделал **порог + лимит**:
+- Порог `τ` подбирается на периоде threshold так, чтобы алертов в день было примерно столько, сколько успевают аналитики. Не по F1.
+- Лимит `K` в день: после K алертов добавляем только транзакции со `score >= τ_high`.
+- Внутри дня алерты сортируются по скору.
+- `τ` пересчитывается при каждом переобучении и пишется в `policy.json`. Распределение скоров может уехать и без смены модели, поэтому доля алертов это отдельная метрика со своим сигналом.
 
-Optional later: group alerts per account/day so an analyst reviews one account, not 30 payments.
+Потом можно группировать алерты по счёту за день, чтобы аналитик смотрел один счёт, а не 30 платежей.
 
-### 4.5 Labels and the feedback loop (the biggest risk)
+### Метки и обратная связь (самое опасное место)
 
-The offline experiments assume labels are known immediately (`README`: "Предположение OTE о немедленной доступности
-меток"). In operation:
+Офлайн я считаю, что метки известны сразу. В жизни:
 
-- Only **alerted** transactions receive a disposition. Non-alerted positives are never discovered unless an
-  external event (SAR, law-enforcement, customer complaint) reveals them. Training on dispositions alone teaches
-  the model its own past decisions (selection bias).
-- Dispositions take days to weeks (**label lag**).
+- Решение получают только те транзакции, по которым был алерт. Пропущенное отмывание никто не увидит, если только оно не всплывёт откуда-то ещё (SAR, полиция, жалоба). Если учиться только на решениях аналитиков, модель учится на своих же прошлых ответах.
+- Решения приходят через дни или недели.
 
-Design:
-1. **Label maturity.** A transaction is trainable as negative only after `L` days (e.g. 30) without a positive
-   outcome; positives enter as they are confirmed.
-2. **Encoder uses matured labels only.** Ordered target encoding at serving time must see only labels that
-   would have been known at that moment. The training pipeline must replay with the same lag, otherwise offline
-   metrics are optimistic. This is a required change to the current OTE assumption.
-3. **Exploration sample.** Reserve a small random slice of the queue (e.g. 5–10% of K, drawn from below-threshold
-   transactions) for review. It is the only unbiased sample of what the model misses, and the only honest way to
-   estimate recall in production.
-4. Store `alert_source ∈ {model, exploration}` so training and evaluation can reweight.
+Что с этим делать:
+1. Транзакцию считаем отрицательной только через `L` дней (например 30), если за это время она не стала положительной. Положительные добавляем сразу как подтвердили.
+2. Encoder при скоринге должен видеть только те метки, которые уже были известны на тот момент. И обучение надо прогонять с такой же задержкой, иначе офлайн-метрики будут завышены. Это значит, что текущее допущение OTE надо менять.
+3. Небольшую часть очереди (5–10% от K) отдавать на случайные транзакции ниже порога. Только так можно узнать, что модель пропускает, и честно оценить recall.
+4. Хранить `alert_source ∈ {model, exploration}`, чтобы потом это учитывать.
 
-Without (3) the system can report precision, but never recall.
+Без пункта 3 precision посчитать можно, а recall нельзя.
 
-### 4.6 Training and promotion
+### Обучение и замена модели
 
-`aml-train` (new CLI; code lifted from notebooks 02, 03):
+`aml-train` (новый CLI, код из ноутбуков 02, 03):
 
-```
-raw + matured labels ─► split (existing calendar-day logic) ─► FeaturePipeline.fit_transform
-  ─► OTE fit on train ─► Optuna search (bounded trials) ─► XGBoost/LightGBM/CatBoost ─► choose by val AP
-  ─► threshold period: set τ for target alerts/day ─► test + rolling backtest ─► candidate bundle
+```text
+raw + созревшие метки → split по дням → FeaturePipeline.fit_transform
+  → OTE на train → Optuna → XGBoost / LightGBM / CatBoost → лучшая по val AP
+  → порог на threshold под нужное число алертов → test + backtest → кандидат
 ```
 
-Promotion gate (all must hold, recorded in `metrics.json`):
-- test AP ≥ champion AP on the **same** window, with a stated tolerance (the backtest shows AP std of 0.007–0.05 over
-  3 days, so a few-point gain is not significant; use a minimum effect size and, ideally, paired bootstrap).
-- Recall at the production alert budget does not regress.
-- Schema, lineage and `SUCCESS` checks pass; unit and equivalence tests green.
-- Score-distribution shift against the champion on the same data is within limits (alert volume predictable).
+Кандидат становится чемпионом, только если:
+- AP на test не хуже чемпиона на тех же данных, с запасом. В backtest разброс AP 0.007–0.05 за 3 дня, так что пара пунктов ничего не значит. Нужен минимальный выигрыш, а лучше бутстрап.
+- Recall при рабочем бюджете алертов не упал.
+- Схема, lineage, `SUCCESS` и тесты в порядке.
+- Распределение скоров не сильно отличается от чемпиона, чтобы число алертов не прыгнуло.
 
-Then **shadow** the candidate for ≥ 3 days (score everything, no alerts), compare, and flip `champion.json`.
-Rollback = flip the pointer back; state for the old bundle is retained for N days.
+После этого кандидат минимум 3 дня работает в тени (скорит, но алерты не создаёт), сравниваем и переключаем `champion.json`. Откат это переключить указатель обратно, состояние старой модели храним N дней.
 
-### 4.7 Monitoring
+### Мониторинг
 
-| Signal | Source | Alarm |
+| Что | Откуда | Когда тревога |
 |---|---|---|
-| Batch freshness / failure | `batch_run` | no successful batch in 2× cadence |
-| Data quality | validation report | rejected rows > 0.5%, schema change, unknown payment format |
-| Late-data rate | watermark rejects | > 0.1% of rows |
-| Feature drift | PSI/KS per feature vs train (notebook 05 logic) | PSI > 0.2 on top-importance features |
-| Score distribution | scores/ daily | alert rate outside ±30% of expected |
-| Currency rates | converter | pair rate vs fitted median deviates beyond tolerance |
-| Analyst outcomes | `disposition` | precision of the queue (7-day rolling), time-to-disposition |
-| Delayed performance | matured labels | AP/recall on exploration sample vs bundle metrics |
-| Resource | process | peak RSS (6 GB on HI-Small ETL), batch duration |
+| пачки не приходят или падают | `batch_run` | нет успешной пачки 2 интервала подряд |
+| качество данных | отчёт проверки | отклонено > 0.5% строк, поменялась схема, новый формат платежа |
+| опоздавшие данные | карантин | > 0.1% строк |
+| дрейф признаков | PSI/KS против train (как в notebook 05) | PSI > 0.2 на важных признаках |
+| скоры | `scores/` по дням | доля алертов дальше ±30% от ожидаемой |
+| курсы валют | converter | курс пары сильно отличается от медианы |
+| решения аналитиков | `disposition` | precision очереди за 7 дней, время на решение |
+| метрики с задержкой | созревшие метки | AP/recall на случайной выборке хуже, чем при обучении |
+| ресурсы | процесс | память (на ETL HI-Small 6 ГБ), время пачки |
 
-Retrain triggers: schedule (weekly), feature drift alarm, or delayed AP below floor. A trigger creates a candidate;
-it never auto-promotes.
+Переобучение запускается по расписанию (раз в неделю), по дрейфу или если AP с задержкой упал. Это создаёт только кандидата, сам он чемпионом не становится.
 
-### 4.8 Interfaces
+### Команды и API
 
-CLI (first), then HTTP for the UI:
+Сначала CLI, потом HTTP для интерфейса:
 
-```
-aml-etl      --source … --output …                  # exists
-aml-train    --etl-run … --out bundles/             # new
-aml-score    --batch raw/2026-10-14.parquet         # new: runs 1–5, idempotent on batch_id
-aml-promote  --bundle <id> [--rollback]             # new
-aml-monitor  --date 2026-10-14                      # new
-```
-
-Analyst API (read-heavy, tiny):
-
-```
-GET  /alerts?status=new&date=…&limit=…          queue, ordered by rank
-GET  /alerts/{id}                                transaction, score, top features, account history summary
-POST /alerts/{id}/disposition {outcome, reason}  append-only; 409 if already final
-GET  /metrics/summary?from=…&to=…                dashboard tiles
+```text
+aml-etl      --source … --output …                  # уже есть
+aml-train    --etl-run … --out bundles/             # новое
+aml-score    --batch raw/2026-10-14.parquet         # новое, шаги 1–5, повтор по batch_id безопасен
+aml-promote  --bundle <id> [--rollback]             # новое
+aml-monitor  --date 2026-10-14                      # новое
 ```
 
-Per-alert explanations: SHAP for tree models, computed **only for alerted rows** (≈500/day), so cost is negligible.
-Store top-5 contributions in `alert`.
+```text
+GET  /alerts?status=new&date=…&limit=…          очередь по порядку
+GET  /alerts/{id}                                транзакция, скор, главные признаки, история счёта
+POST /alerts/{id}/disposition {outcome, reason}  только дописываем, 409 если уже решено
+GET  /metrics/summary?from=…&to=…                цифры для dashboard
+```
 
----
+Объяснения через SHAP считаю только для алертов (~500 в день), это почти бесплатно. Топ-5 признаков сохраняю в `alert`.
 
-## 5. Scale and reliability
+## Нагрузка и сбои
 
-### Load estimate
-- Mean 6 tx/s; peak 60 tx/s. One daily batch of 0.5 M rows runs in seconds; the history update and scoring are
-  vectorised, so a 15-minute micro-batch (~5k rows) is dominated by state load/save unless state stays resident.
-- **Keep the scorer as a long-lived process** holding the state in memory; snapshot after each batch (≈100 MB,
-  sub-second to local SSD). Do not `joblib.load` per batch.
-- Memory: state is bounded by accounts + last-24 h events. ~100 MB at this scale; 100× volume ≈ 10 GB.
-- ETL/training peak is ~6 GB, driven by pandas string columns (35 M Python strings), not features. Cast ID columns to
-  `category` or dictionary-encoded Arrow strings before it matters.
+Нагрузка:
+- В среднем 6 транзакций в секунду, в пике 60. Пачка за день (0.5 млн строк) считается за секунды. Пачка за 15 минут (~5 тыс. строк) будет упираться в загрузку и сохранение состояния, если каждый раз его грузить.
+- Поэтому скоринг лучше сделать постоянно работающим процессом, который держит состояние в памяти, а после пачки сохраняет снимок (~100 МБ, меньше секунды на SSD). Не делать `joblib.load` на каждую пачку.
+- Состояние зависит от числа счетов и событий за последние 24 ч. Сейчас ~100 МБ, при объёме в 100 раз больше будет ~10 ГБ.
+- ETL и обучение съедают ~6 ГБ из-за строковых колонок pandas. Если станет проблемой, перевести ID в `category` или словарные строки Arrow.
 
-### Scaling path (only when needed)
-| Trigger | Step |
+Если вырастет:
+
+| Когда | Что делать |
 |---|---|
-| Training > 1 h | Pre-encode IDs to integers in ingest; move split/feature joins to Polars or DuckDB; GPU XGBoost |
-| State > RAM of one box | Shard by account **key** – but sender features also read the *receiver's* history, so a transaction touches two shards. Options: replicate receiver-side aggregates, or two-hop lookup. This is the hardest scaling step; avoid by staying single-node as long as possible |
-| < 1 min latency | Replace file batches with a queue (Kafka/Redpanda), keep the same `transform_update` core behind a consumer |
+| обучение дольше часа | ID в числа при приёме, джойны на Polars или DuckDB, XGBoost на GPU |
+| состояние не влезает в память | делить по счёту. Но признаки отправителя смотрят и на историю получателя, так что одна транзакция трогает две части. Это самое сложное, лучше как можно дольше жить на одной машине |
+| нужна задержка меньше минуты | вместо файлов очередь (Kafka/Redpanda), внутри тот же `transform_update` |
 
-### Failure modes
-| Failure | Effect | Handling |
+Что может сломаться:
+
+| Сбой | Что будет | Что делаем |
 |---|---|---|
-| Scorer crash mid-batch | Partial outputs | Commit order in 4.3; re-run is idempotent |
-| State snapshot corrupt | Features wrong silently | SHA256 in `batch_run`; replay from raw |
-| Late/out-of-order events | Leakage invariant broken | Watermark + quarantine |
-| Bad currency rate (new currency) | Run stops (by design) | Quarantine rows with unknown currency; alert on-call; do not default to rate 1 |
-| Source re-delivered | Double scoring | `batch_id` + source SHA256 uniqueness |
-| Model/feature mismatch | Garbage scores | Schema-hash check at load; bundle is atomic |
-| Alert flood | Analysts overwhelmed | Daily cap `K`; alert-rate alarm |
-| DB down | UI unavailable | Scoring writes Parquet first; alerts back-filled to DB when it returns |
+| скоринг упал посреди пачки | часть результатов записана | порядок записи выше, перезапуск безопасен |
+| битый снимок состояния | признаки молча неправильные | SHA256 в `batch_run`, восстановление из raw |
+| данные пришли не по порядку | утечка из будущего | проверка времени + карантин |
+| новая валюта без курса | запуск падает (так и задумано) | строки в карантин, сигнал, курс 1 не подставлять |
+| ту же пачку прислали дважды | двойной скоринг | уникальность `batch_id` + SHA256 |
+| модель не от тех признаков | мусорные скоры | проверка хэша схемы, пакет целиком |
+| слишком много алертов | аналитики не успевают | лимит `K`, сигнал по доле алертов |
+| Postgres упал | интерфейс не работает | скоры сначала в Parquet, алерты дольём потом |
 
-### Redundancy
-Single node with daily backup of `raw/`, `scores/`, Postgres and the latest state snapshot. Scoring is stateless
-given raw + a snapshot, so a cold standby can take over after a replay. Active/active is unjustified at this scale.
+Резерв: одна машина и ежедневный бэкап `raw/`, `scores/`, Postgres и последнего снимка. Имея raw и снимок, вторую машину можно поднять за время прогона. Держать две машины одновременно при таком объёме смысла нет.
 
----
+## Безопасность
 
-## 6. Security and compliance
-- PII: real account numbers must be tokenised at ingest; models and dashboards use the token. The synthetic
-  dataset needs none, but design the join key so that it can be swapped.
-- Access: analysts see alerts and account history; only the pipeline role writes `scores/` and `raw/`; promotion
-  requires a second person.
-- Artifacts: signed/hashed bundles (see 4.1); no network-loaded pickles.
-- Audit: `score_log` + `lineage.json` answer "why was this flagged / not flagged on date X". Retain per policy.
-- Fairness/model-risk: document features used; exclude any proxy for protected attributes if real data is used.
+- На реальных данных номера счетов надо заменять токенами при приёме, модель и dashboard работают с токенами. Для синтетики не нужно, но ключ надо сделать так, чтобы его можно было подменить.
+- Аналитики видят алерты и историю счёта. Писать в `scores/` и `raw/` может только пайплайн. Смену модели подтверждает второй человек.
+- Пакеты с хэшами, pickle не грузим по сети.
+- `score_log` и `lineage.json` отвечают на вопрос «почему это отметили или не отметили в день X».
+- На реальных данных записать, какие признаки используются, и убрать всё, что может заменять защищённые признаки.
 
----
+## Почему так, а не иначе
 
-## 7. Trade-off analysis
-
-| Decision | Chosen | Alternative | Why | Cost of choice |
+| Решение | Выбрал | Альтернатива | Почему | Чем плачу |
 |---|---|---|---|---|
-| Micro-batch vs streaming | Micro-batch, 15 min | Kafka + streaming consumer | No blocking requirement; matches daily alert budget; reuses tested batch code | Detection latency up to 15 min; revisit if blocking is wanted |
-| Single-writer state | One scorer process | Sharded feature store (Redis/Feast) | 100 MB state; correctness already tested; no infra | Vertical scaling only; no hot standby without replay |
-| State as cache, raw as truth | Replay from Parquet | Persist state in DB | Rebuild takes seconds-minutes; removes a consistency problem | Slow recovery if raw grows large (add periodic full snapshots) |
-| Parquet + Postgres | Two stores | Parquet only / warehouse | Analytics volume in Parquet, transactional alert workflow in Postgres | Two systems to back up |
-| Threshold + cap | Fixed capacity | Pure max-F1 | Capacity is the real constraint; F1 ignores analyst cost | Threshold re-calibration on each retrain |
-| Exploration slice | 5–10% of queue | None | Only way to measure recall and break selection bias | Spends analyst time on likely negatives |
-| XGBoost as champion | Keep | LightGBM / ensemble | Beats LightGBM on all 3 backtest windows | Evidence is 3 correlated dev days, not independent |
-| Notebooks → library + CLI | Port | Keep notebooks as pipeline | Reproducibility, CI, scheduling | Upfront refactor; keep notebooks for exploration only |
-| Pickle bundles | `joblib` + hashes | ONNX / native model formats for the model, JSON for state | Fast to ship; state is a Python object | Pickle risk, Python-version pinning. Model alone can already be exported as `xgboost` JSON |
-| Orchestration | cron/systemd (or Prefect later) | Airflow | Two or three jobs; no DAG complexity | Manual retry visibility; adopt a scheduler when jobs > ~5 |
+| пачки или поток | пачки по 15 минут | Kafka и поток | блокировать платежи не надо, бюджет алертов дневной, код пачек уже проверен | алерт может прийти через 15 минут |
+| один процесс на состояние | да | feature store (Redis/Feast) | состояние ~100 МБ, корректность уже проверена тестами | расти только вверх, без горячего резерва |
+| raw главный, состояние кэш | восстанавливаю из Parquet | хранить состояние в БД | пересчёт занимает секунды или минуты | если raw станет огромным, восстановление долгое |
+| Parquet + Postgres | два хранилища | только Parquet или DWH | аналитика в Parquet, работа с алертами в Postgres | бэкапить два места |
+| порог + лимит | да | порог по max F1 | реальное ограничение это сколько успевают аналитики | порог надо пересчитывать |
+| случайная доля в очереди | 5–10% | не делать | иначе recall не узнать | аналитики тратят время на почти наверняка нормальные транзакции |
+| XGBoost чемпион | оставить | LightGBM, ансамбль | выиграл во всех 3 окнах backtest | 3 соседних дня это мало |
+| ноутбуки → код + CLI | переносить | оставить ноутбуки | воспроизводимость, CI, расписание | надо потратить время на рефакторинг |
+| pickle | `joblib` + хэши | ONNX / нативные форматы | быстро, состояние это Python-объект | риски pickle, привязка к версии Python |
+| запуск по расписанию | cron/systemd, потом Prefect | Airflow | задач две-три | ретраи руками, взять планировщик если задач станет > 5 |
 
----
+## План
 
-## 8. Roadmap
-
-| Phase | Deliverable | Exit criterion |
+| Этап | Что сделать | Когда готово |
 |---|---|---|
-| 0 – finish the offline loop | Move training (notebooks 02–04) into `aml.model.train`, `aml-train` CLI; ETL emits the encoder; restore `model/train.py` as a real module; commit the ETL rewrite | `aml-etl` → `aml-train` → bundle with no notebook, covered by an end-to-end test |
-| 1 – scoring | `aml-score` on a bundle, watermark, idempotent batches, state snapshots, schema-hash checks | Replay of the test period equals offline test scores bit-for-bit |
-| 2 – alerts | Postgres schema, alert policy with cap, queue API | Daily queue ≤ K; same input gives same alerts |
-| 3 – feedback | Disposition capture, exploration slice, label-lag-aware OTE and training | Offline metrics re-run with lagged labels; documented drop vs. immediate labels |
-| 4 – operations | Monitoring job, drift alarms, shadow mode, promotion gate, rollback | A drill: bad candidate is rejected; rollback restored in < 5 min |
-| 5 – scale/UX | Account-level grouping, explanations, dashboard from live data | Analyst usability review |
+| 0 | обучение из ноутбуков 02–04 в `aml.model.train` и CLI `aml-train` | `aml-etl` → `aml-train` → пакет без ноутбуков, есть end-to-end тест |
+| 1 | `aml-score`: проверка времени, повторяемые пачки, снимки, проверка схемы | прогон test-периода даёт те же скоры, что офлайн |
+| 2 | Postgres, алерты с лимитом, API очереди | очередь не больше K, одинаковый вход → одинаковые алерты |
+| 3 | сбор решений, случайная доля, OTE и обучение с задержкой меток | метрики пересчитаны с задержкой, записано, насколько упали |
+| 4 | мониторинг, сигналы дрейфа, теневой режим, проверка кандидата, откат | плохой кандидат отклонён, откат меньше 5 минут |
+| 5 | группировка по счёту, объяснения, dashboard на живых данных | аналитикам удобно |
 
-Phases 0 and 1 are the highest value per effort: they remove the notebook dependency and the training/serving gap.
-Phase 3 is the one most likely to change the model's reported numbers.
+Больше всего пользы от этапов 0 и 1: уходит зависимость от ноутбуков и разница между обучением и скорингом. Этап 3 скорее всего сильнее всего поменяет цифры модели.
 
----
+## Что потом пересмотреть
 
-## 9. What to revisit as the system grows
+1. Если нужно будет блокировать платежи, пачки не подойдут, нужен поток с жёстким лимитом по времени и кэш признаков по счёту.
+2. Как делить состояние на части, если признаки получателя мешают. Решить до того, как перестанет влезать в память.
+3. Графовые признаки. Отмывание это структура (fan-out/fan-in, циклы, цепочки), а у меня окна по одному счёту. Многошаговые признаки или GNN, наверное, подняли бы recall.
+4. Когда появятся настоящие решения аналитиков, всё переоценить. Метки симулятора, особенно хвост, на реальность не похожи.
+5. Может, лучше отдельные модели для разных форматов платежа или валют, или правила + ML. Посмотреть `reports/full/error_analysis` по сегментам.
+6. Когда моделей или окружений станет несколько, заменить папки с указателями на MLflow и нормальный планировщик.
+7. Backtest на 3 днях не различает модели на уровне 0.01–0.05 AP. Нужна история длиннее (HI-Medium/Large) и бутстрап.
 
-1. **Streaming and latency.** If the business wants to hold or block payments, micro-batch is wrong; move to a
-   consumer with a hard latency budget and a precomputed per-account feature cache.
-2. **State sharding.** Receiver-side features make account sharding non-trivial. Decide the replication strategy
-   before the state exceeds one machine's RAM.
-3. **Graph features.** Laundering is structural (fan-out/fan-in, cycles, chains). Current features are
-   per-account windows; multi-hop or GNN features would likely raise recall but need a graph store and a different
-   freshness story.
-4. **Label quality.** Re-estimate everything once real dispositions exist; the synthetic generator's labels,
-   including its end-of-simulation positive tail, are not representative.
-5. **Separate models.** One model for all payment formats/currencies may be inferior to segment-specific models or
-   rules plus ML. Look at `reports/full/error_analysis` by segment.
-6. **Registry and orchestration.** Replace directory pointers with MLflow (or similar) and a scheduler once there
-   are multiple models, environments or teams.
-7. **Evaluation statistics.** The three-window backtest cannot separate models at the 0.01–0.05 AP level. Longer
-   history (HI-Medium/Large) and bootstrap intervals are needed before using small gains to decide promotions.
+## Открытые вопросы
 
-## 10. Open questions
-- Is the real use case alerting after the fact (assumed) or authorising/blocking payments?
-- What is analyst capacity (alerts/day) and cost per review? This sets `K`, and the economically right threshold.
-- Which fields exist at scoring time? The dataset has no arrival time, so availability of `Amount Received` and
-  `Receiving Currency` at decision time is assumed (already noted in `docs/ETL.md`).
-- Are dispositions available in a system we can read, and with what delay?
-- Retention and privacy rules for transaction data and scores.
+- Это проверка после факта (как я предположил) или надо блокировать платежи?
+- Сколько алертов в день успевают разобрать аналитики и сколько стоит одна проверка? От этого зависят `K` и порог.
+- Какие поля реально есть в момент скоринга? В данных нет времени поступления, так что доступность `Amount Received` и `Receiving Currency` это допущение (есть в [ETL.md](ETL.md)).
+- Можно ли читать решения аналитиков из какой-то системы и с какой задержкой?
+- Сколько можно хранить транзакции и скоры и какие правила по персональным данным.
