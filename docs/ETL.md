@@ -8,7 +8,7 @@ ETL берёт сырой CSV с транзакциями и готовит из
 
 ## Откуда взять данные
 
-Нужен файл `LI-Small_Trans.csv` из [IBM Transactions for Anti Money Laundering](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml/data).
+Сейчас основной прогон идёт на `HI-Small_Trans.csv` из [IBM Transactions for Anti Money Laundering](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml/data). Раньше я брал `LI-Small_Trans.csv`, ETL работает с обоими.
 
 Из корня проекта:
 
@@ -19,7 +19,13 @@ kaggle auth login
 python3 scripts/download_dataset.py
 ```
 
-Скрипт кладёт CSV в `data/raw/`. Он качает только этот один файл, сам распаковывает zip и проверяет заголовок и первую строку. Если загрузка оборвётся, недокачанный файл в папке не останется. Если файл уже скачан, второй раз он не качается.
+Скрипт сделан для скачивания только `LI-Small_Trans.csv`. HI-Small можно скачать напрямую через Kaggle CLI (если придёт zip, распакуйте его в `data/raw/`):
+
+```bash
+kaggle datasets download -d ealtman2019/ibm-transactions-for-anti-money-laundering-aml -f HI-Small_Trans.csv -p data/raw
+```
+
+Скрипт кладёт CSV в `data/raw/`. Он качает только один файл, сам распаковывает zip и проверяет заголовок и первую строку. Если загрузка оборвётся, недокачанный файл в папке не останется. Если файл уже скачан, второй раз он не качается.
 
 В CSV две колонки называются `Account`, так и должно быть. pandas переименует вторую в `Account.1`. Проверка заголовка нужна только чтобы понять, что скачали правильный файл, нормальная проверка данных идёт потом.
 
@@ -39,7 +45,7 @@ python3 scripts/download_dataset.py --output-dir /path/to/raw
 
 ```bash
 uv run --locked aml-etl \
-  --source data/raw/LI-Small_Trans.csv \
+  --source data/raw/HI-Small_Trans.csv \
   --output artifacts/runs-smoke \
   --smoke
 ```
@@ -50,7 +56,7 @@ uv run --locked aml-etl \
 
 ```bash
 uv run --locked aml-etl \
-  --source data/raw/LI-Small_Trans.csv \
+  --source data/raw/HI-Small_Trans.csv \
   --output artifacts/runs
 ```
 
@@ -214,11 +220,11 @@ X_new = encoder.transform(pipeline.transform_update(validate_raw(new_transaction
 
 ## Ограничения
 
-- После ETL данные уже числовые, можно сразу идти в notebook 03. Notebook 02 не обязателен: там я заново собираю признаки с исходными категориями, чтобы сравнить CatBoost на сырых категориях и OTE.
+- После ETL данные уже числовые, можно сразу идти в notebook 03. Notebook 02 не обязателен: там я заново собираю признаки с исходными категориями, чтобы сравнить CatBoost на сырых категориях и OTE. На HI-Small OTE оказался не лучше (AP 0.630 против 0.638 у сырых категорий), но я его оставил, потому что LightGBM, XGBoost и логрегрессия строки не принимают.
 - На HI-Small пиковая память около 6 ГБ. Это из-за строковых колонок в pandas (35 млн Python-строк), история тут ни при чём.
 - Smoke нужен только чтобы проверить, что код работает. Распределение классов и связи между счетами там другие, так что метрики на нём ничего не значат.
 - В данных нет времени, когда событие или метка реально стали известны. То, что поля получателя платежа доступны в момент скоринга, это допущение.
-- Старый полный эксперимент делался на локальном Parquet. Я не проверял, что он совпадает с CSV, который скачивается сейчас.
+- Старый полный эксперимент на LI-Small (в `reports/`) делался на локальном Parquet. Я не проверял, что он совпадает с CSV, который скачивается сейчас.
 
 ## Тесты
 
